@@ -1,0 +1,29 @@
+# eclipse specific git ignore
+.metadata/
+RemoteSystemsTempFiles/
+.settings/
+Debug/
+*.launch
+
+# STM32 git ignore
+*.mxproject
+
+MDK-ARM/Lesson*
+MDK-ARM/Debug*
+
+*.o
+*.d
+*.crf
+
+Drivers/
+*.uv*
+*.htm
+*.lnp
+*.axp
+*.hex
+*.axf
+*.map
+*.sct
+*.dep
+
+
