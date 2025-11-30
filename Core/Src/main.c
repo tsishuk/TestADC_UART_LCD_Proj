@@ -43,7 +43,7 @@
 #define ADC_SAMPLES 50	// Кол-во отсчётов которые нужно накопить для усреднения
 #define CHANNELS_CNT 6	// Кол-во кактивных аналов АЦП участвующих в получении значений
 
-#define UART_MS_TIMEOUT 1000	// Период в мс выдачи информации по UART1
+#define UART_TIMER_CNT 50	// Период в отсчётах по 20мс для выдачи информации АЦП по UART1
 #define LCD_MS_TIMEOUT 500	// Период в мс выдачи информации по LCD1602
 
 typedef enum {	// Для хранения состояния кнопок BTN1, BTN2
@@ -66,22 +66,26 @@ DMA_HandleTypeDef hdma_adc1;
 TIM_HandleTypeDef htim1;
 TIM_HandleTypeDef htim2;
 TIM_HandleTypeDef htim3;
+TIM_HandleTypeDef htim4;
 
 UART_HandleTypeDef huart1;
+DMA_HandleTypeDef hdma_usart1_tx;
 
 /* USER CODE BEGIN PV */
 
 // Буфер для получения определённого кол-ва значений со всех активных каналов АЦП
 // (*2) для того чтобы можно было использовать прерывания по половине заполнения буфера и по целому буферу
 uint16_t adc_buffer[ADC_SAMPLES * CHANNELS_CNT * 2] = {0};
-
-// Для хранения усреднённых значений АЦП по 5 каналам и температурному датчику
-float adc1_v, adc2_v, adc3_v, adc4_v, adc5_v;
-float adc_temperature;
-int ten_temperature = 0;	// Заглушка с температурой (по заданию)
-
+float adc1_v, adc2_v, adc3_v, adc4_v, adc5_v;	// Для хранения усреднённых значений АЦП по 5 каналам
+float adc_temperature;	// и температурному датчику
 uint8_t but1_shift_reg = 0, but2_shift_reg = 0;	// Сдвиговые регистры для отслеживания нажатий\отпусканий кнопок
 BTN_STATE btn1_state = NO_PRESS, btn2_state = NO_PRESS;	// Текущее состояние кнопок
+char buf[100];	// буфер для UART-строки(с нажатием\отжатием кнопок) с запасом по кол-ву символов
+uint8_t size;	// Для подсчёта текущей	 длины строки UART
+char uart_buf[100];	// буфер для UART-строки(с усреднениями АЦП) с запасом по кол-ву символов
+uint8_t uart_size;	// Для подсчёта текущей	 длины строки UART(с усреднениями АЦП)
+uint8_t timer4_counter = 0;	// Счётчик кол-ва срабатываний Таймера4
+uint8_t uart_mutex = 1;	// Мьютекс разрешения передачи через UART
 
 /* USER CODE END PV */
 
@@ -94,6 +98,7 @@ static void MX_TIM1_Init(void);
 static void MX_TIM3_Init(void);
 static void MX_ADC1_Init(void);
 static void MX_TIM2_Init(void);
+static void MX_TIM4_Init(void);
 /* USER CODE BEGIN PFP */
 
 /* USER CODE END PFP */
@@ -105,7 +110,7 @@ static void MX_TIM2_Init(void);
 void averaging_adc_values(uint16_t *buffer) {
 
     uint32_t sum[6] = {0,0,0,0,0,0};	// Для целочисленных сумм значений соответствующих каналов
-    uint16_t pwm_value;
+    uint16_t pwm_value;	// Для новой скважности PWM
 
     for (int i = 0; i < ADC_SAMPLES; i++) {
     	sum[0] += buffer[i * CHANNELS_CNT];	// Суммируем значения полученные от канала за все отсчёты
@@ -120,13 +125,21 @@ void averaging_adc_values(uint16_t *buffer) {
     pwm_value = (sum[0] / ADC_SAMPLES);	// Новое значение для скважности ШиМа
     if (pwm_value < 2)
     	pwm_value = 2;	// Ограничиваем минимально возможную скважность (1мкс плохо видит шинный анализатор)
-    TIM2->CCR3 = pwm_value;
+    TIM2->CCR3 = pwm_value;	// Установка новой скважности
 
     adc1_v = (float)((sum[0] / ADC_SAMPLES)*(Vref / 0xFFF));	// Для получения значений в диапазоне 0В - 3.3В
     adc2_v = (float)((sum[1] / ADC_SAMPLES)*(Vref / 0xFFF));
     adc3_v = (float)((sum[2] / ADC_SAMPLES)*(Vref / 0xFFF));
     adc4_v = (float)((sum[3] / ADC_SAMPLES)*(Vref / 0xFFF));
     adc5_v = (float)((sum[4] / ADC_SAMPLES)*(Vref / 0xFFF));
+
+    /*
+    adc1_v_copy = adc1_v;
+    adc2_v_copy = adc2_v;
+    adc3_v_copy = adc3_v;
+    adc4_v_copy = adc4_v;
+    adc5_v_copy = adc5_v;
+    */
 
     adc_temperature = (float)((sum[5] / ADC_SAMPLES)*(Vref / 0xFFF));	// Для получения значения напряжения на температурном датчике
     adc_temperature = (tV_25 - adc_temperature)/tSlope + 25;   			// Температура в градусах (формула пересчёта найдена на форумах)
@@ -142,12 +155,9 @@ int main(void)
 {
   /* USER CODE BEGIN 1 */
 
-	uint32_t now_lcd = 0, then_lcd = 250;	// Для отсчёта интервалов времени между выдачами по LCD1602
-	uint32_t now_uart = 0, then_uart = 0;	// Для отсчёта интервалов времени между выдачами по UART
-	char buf[100];	// буфер для UART-строки с запасом по кол-ву символов
+	uint32_t now_lcd = 0, then_lcd = 0;	// Для отсчёта интервалов времени между выдачами по LCD1602
 	char lcd_str[16];	// строка для отображения на LCD1602
 	uint8_t str_size;	// Для подсчёта текущей	 длины строки для вывода на LCD1602
-	uint8_t size;	// Для подсчёта текущей	 длины строки UART
 
   /* USER CODE END 1 */
 
@@ -175,36 +185,20 @@ int main(void)
   MX_TIM3_Init();
   MX_ADC1_Init();
   MX_TIM2_Init();
+  MX_TIM4_Init();
   /* USER CODE BEGIN 2 */
 
-	LCD_init();
-
-	/*
-	LCD_SetPos(0, 0);	// Перевод курсора на 0 символ 0 строки (отсчёт с нуля)
-	sprintf(lcd_str, "%3ddg %2.1fv", 23, 1.2);
-	str_size = strlen(lcd_str);
-	if (str_size < 16)
-		lcd_str[str_size] = 0;
-	LCD_String(lcd_str);
-
-	LCD_SetPos(0, 1);	// Перевод курсора на 0 символ 1 строки
-	sprintf(lcd_str, "%3ddg %2.1fv", 45, 7.8);
-	str_size = strlen(lcd_str);
-	if (str_size < 16)
-		lcd_str[str_size] = 0;
-	LCD_String(lcd_str);
-	*/
-
-
+	LCD_init();	// инициализация дисплея LCD1602
 	// Разрешён ScanConversionMode для того чтобы можно было опрашивать несколько каналов АЦП подряд
 	// В качестве триггера для запуска АЦП выступают прерывания от Таймера3
-	HAL_ADCEx_Calibration_Start(&hadc1);	// Калибровка
+	HAL_ADCEx_Calibration_Start(&hadc1);	// Калибровка АЦП
 	HAL_ADC_Start_DMA(&hadc1, (uint32_t *)adc_buffer, ADC_SAMPLES * CHANNELS_CNT * 2);	// Запуск АЦП с сохранением отсчётов через DMA в кольцевой буфер
 	HAL_TIM_Base_Start_IT(&htim1);	// Таймер для отсчёта 5мс (опрос кнопок BUT1, BUT2 в прерывании)
 	HAL_TIM_Base_Start_IT(&htim3);	// Таймер для отсчёта 100мкс(10КГц) для запуска АЦП
-
-	HAL_TIM_PWM_Start(&htim2, TIM_CHANNEL_3);	// Запуск генерации Ш�?М (TIM2->CH3)
-	TIM2->CCR3 = 1;	// Установка начального значения скважности Ш�?М
+	HAL_TIM_Base_Start_IT(&htim4);	// Таймер 20мс для вывода информации по UART_DMA
+	HAL_TIM_PWM_Start(&htim2, TIM_CHANNEL_3);	// Запуск генерации PWM (TIM2->CH3)
+	TIM2->CCR3 = 1;	// Установка начального значения скважности PWM
+	timer4_counter = 0;	// Счётчик для отслеживания секундных интервалов с помощью Таймера4(20мс)
 
   /* USER CODE END 2 */
 
@@ -216,58 +210,25 @@ int main(void)
 
     /* USER CODE BEGIN 3 */
 
-	// Асинхронный вывод нажатий\отпусканий кнопок
-	if (btn1_state != NO_PRESS)
-	{
-		if (btn1_state == PRESS)
-			sprintf(buf, "BUT1 pressed\n");
-		else
-			sprintf(buf, "BUT1 released\n");
-		size = strlen(buf);
-		btn1_state = NO_PRESS;
-		HAL_UART_Transmit(&huart1, (uint8_t*)buf, size, 100);
-	}
-
-	if (btn2_state != NO_PRESS)
-	{
-		if (btn2_state == PRESS)
-			sprintf(buf, "BUT2 pressed\n");
-		else
-			sprintf(buf, "BUT2 released\n");
-		size = strlen(buf);
-		btn2_state = NO_PRESS;
-		HAL_UART_Transmit(&huart1, (uint8_t*)buf, size, 100);
-	}
-
-	// Получаем кол-во прошедших со старта мс
-	now_uart = HAL_GetTick();
-
-	// Вывод усреднённых значений по UART каждую секунду
-	// >= используется на случай если вывод по UART состояния кнопок займёт лишние мс
-	if ((now_uart - then_uart) >= UART_MS_TIMEOUT)
-	{
-		then_uart = now_uart;
-
-		sprintf(buf, "ts = %2ddg, tt = %1ddg, u1 = %2.1fV, u2 = %2.1fV, u3 = %2.1fV, u4 = %2.1fV, u5 = %2.1fV\n",
-						(int)adc_temperature, ten_temperature, adc1_v, adc2_v, adc3_v, adc4_v, adc5_v);
-		size = strlen(buf);
-		HAL_UART_Transmit(&huart1, (uint8_t*)buf, size, 50);
-
-		// Отладочная мигалка
-		HAL_GPIO_TogglePin(led_pc13_GPIO_Port, led_pc13_Pin);
-	}
-
 	// Вывод усреднённых значений на LCD1602 каждые 500мс
 	now_lcd = HAL_GetTick();
 	if ((now_lcd - then_lcd) >= LCD_MS_TIMEOUT)
 	{
 		then_lcd = now_lcd;
 
+		// Формирование строки для дальнейшей выдачи по UART в Таймере4. Формируется здесь, иначе сбоит sprintf()
+		if (uart_mutex == 1)
+		{
+			sprintf(uart_buf, "ts = %2ddg, u1 = %2.1fV, u2 = %2.1fV, u3 = %2.1fV, u4 = %2.1fV, u5 = %2.1fV\n",
+							(int)adc_temperature, adc1_v, adc2_v, adc3_v, adc4_v, adc5_v);
+			uart_size = strlen(uart_buf);
+		}
+
 		LCD_SetPos(0, 0);	// Перевод курсора на 0 символ 0 строки (отсчёт с нуля)
 		sprintf(lcd_str, "%3ddg %2.1fv %2.1fv", (int)adc_temperature, adc1_v, adc2_v);
 		str_size = strlen(lcd_str);
 		if (str_size < 16)
-			lcd_str[str_size] = 0;
+			lcd_str[str_size] = 0;	// Признак завершения строки
 		LCD_String(lcd_str);
 
 		LCD_SetPos(1, 1);	// Перевод курсора на 1 символ 1 строки (для выравнивания строк)
@@ -562,6 +523,51 @@ static void MX_TIM3_Init(void)
 }
 
 /**
+  * @brief TIM4 Initialization Function
+  * @param None
+  * @retval None
+  */
+static void MX_TIM4_Init(void)
+{
+
+  /* USER CODE BEGIN TIM4_Init 0 */
+
+  /* USER CODE END TIM4_Init 0 */
+
+  TIM_ClockConfigTypeDef sClockSourceConfig = {0};
+  TIM_MasterConfigTypeDef sMasterConfig = {0};
+
+  /* USER CODE BEGIN TIM4_Init 1 */
+
+  /* USER CODE END TIM4_Init 1 */
+  htim4.Instance = TIM4;
+  htim4.Init.Prescaler = 7200;
+  htim4.Init.CounterMode = TIM_COUNTERMODE_UP;
+  htim4.Init.Period = 200;
+  htim4.Init.ClockDivision = TIM_CLOCKDIVISION_DIV1;
+  htim4.Init.AutoReloadPreload = TIM_AUTORELOAD_PRELOAD_DISABLE;
+  if (HAL_TIM_Base_Init(&htim4) != HAL_OK)
+  {
+    Error_Handler();
+  }
+  sClockSourceConfig.ClockSource = TIM_CLOCKSOURCE_INTERNAL;
+  if (HAL_TIM_ConfigClockSource(&htim4, &sClockSourceConfig) != HAL_OK)
+  {
+    Error_Handler();
+  }
+  sMasterConfig.MasterOutputTrigger = TIM_TRGO_UPDATE;
+  sMasterConfig.MasterSlaveMode = TIM_MASTERSLAVEMODE_DISABLE;
+  if (HAL_TIMEx_MasterConfigSynchronization(&htim4, &sMasterConfig) != HAL_OK)
+  {
+    Error_Handler();
+  }
+  /* USER CODE BEGIN TIM4_Init 2 */
+
+  /* USER CODE END TIM4_Init 2 */
+
+}
+
+/**
   * @brief USART1 Initialization Function
   * @param None
   * @retval None
@@ -607,6 +613,9 @@ static void MX_DMA_Init(void)
   /* DMA1_Channel1_IRQn interrupt configuration */
   HAL_NVIC_SetPriority(DMA1_Channel1_IRQn, 0, 0);
   HAL_NVIC_EnableIRQ(DMA1_Channel1_IRQn);
+  /* DMA1_Channel4_IRQn interrupt configuration */
+  HAL_NVIC_SetPriority(DMA1_Channel4_IRQn, 0, 0);
+  HAL_NVIC_EnableIRQ(DMA1_Channel4_IRQn);
 
 }
 
@@ -629,8 +638,8 @@ static void MX_GPIO_Init(void)
   HAL_GPIO_WritePin(led_pc13_GPIO_Port, led_pc13_Pin, GPIO_PIN_RESET);
 
   /*Configure GPIO pin Output Level */
-  HAL_GPIO_WritePin(GPIOB, led_pb0_Pin|led_pb1_Pin|led_pb12_Pin|D4_Pin
-                          |D5_Pin|D6_Pin|D7_Pin, GPIO_PIN_RESET);
+  HAL_GPIO_WritePin(GPIOB, led_pb0_Pin|led_pb1_Pin|led_pb11_Pin|led_pb12_Pin
+                          |D4_Pin|D5_Pin|D6_Pin|D7_Pin, GPIO_PIN_RESET);
 
   /*Configure GPIO pin Output Level */
   HAL_GPIO_WritePin(GPIOA, EN_Pin|RS_Pin, GPIO_PIN_RESET);
@@ -642,8 +651,10 @@ static void MX_GPIO_Init(void)
   GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;
   HAL_GPIO_Init(led_pc13_GPIO_Port, &GPIO_InitStruct);
 
-  /*Configure GPIO pins : led_pb0_Pin led_pb1_Pin led_pb12_Pin D7_Pin */
-  GPIO_InitStruct.Pin = led_pb0_Pin|led_pb1_Pin|led_pb12_Pin|D7_Pin;
+  /*Configure GPIO pins : led_pb0_Pin led_pb1_Pin led_pb11_Pin led_pb12_Pin
+                           D7_Pin */
+  GPIO_InitStruct.Pin = led_pb0_Pin|led_pb1_Pin|led_pb11_Pin|led_pb12_Pin
+                          |D7_Pin;
   GPIO_InitStruct.Mode = GPIO_MODE_OUTPUT_PP;
   GPIO_InitStruct.Pull = GPIO_NOPULL;
   GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;
@@ -705,6 +716,50 @@ void HAL_TIM_PeriodElapsedCallback(TIM_HandleTypeDef *htim)
 	// Отслеживается момент запуска преобразований на АЦП
 	else if (htim->Instance == TIM3)
 		HAL_GPIO_TogglePin(led_pb1_GPIO_Port,  led_pb1_Pin);
+
+	// Таймер для формирования выдачи по UART через DMA
+	else if (htim->Instance == TIM4)
+	{
+		timer4_counter++;
+
+		// Вывод строки с усреднёнными значениями по UART
+		if ((timer4_counter > UART_TIMER_CNT) && (uart_mutex == 1))
+		{
+			uart_mutex = 0;
+			timer4_counter = 0;
+			HAL_TIM_Base_Stop_IT(&htim4);	// Запрещаем работу прерываний Таймера4 (чтобы не случилось набегания при повторном срабатывании)
+			// Выдача по UART записанной заранее строки (иначе сбоит, не проходит sprintf())
+			HAL_UART_Transmit_DMA(&huart1, (uint8_t*)uart_buf, uart_size);
+		}
+		// Вывод нажатия\отпускания BUT1
+		else if ((btn1_state != NO_PRESS) && (uart_mutex == 1))
+		{
+			uart_mutex = 0;
+			if (btn1_state == PRESS)
+				sprintf(buf, "BUT1 pressed\n");
+			else
+				sprintf(buf, "BUT1 released\n");
+			size = strlen(buf);
+			btn1_state = NO_PRESS;
+
+			HAL_UART_Transmit_DMA(&huart1, (uint8_t*)buf, size);
+		}
+		// Вывод нажатия\отпускания BUT2
+		else if ((btn2_state != NO_PRESS) && (uart_mutex == 1))
+		{
+			uart_mutex = 0;
+			if (btn2_state == PRESS)
+				sprintf(buf, "BUT2 pressed\n");
+			else
+				sprintf(buf, "BUT2 released\n");
+			size = strlen(buf);
+			btn2_state = NO_PRESS;
+			uart_mutex = 0;
+			HAL_UART_Transmit_DMA(&huart1, (uint8_t*)buf, size);
+		}
+
+		HAL_GPIO_TogglePin(led_pb11_GPIO_Port,  led_pb11_Pin);
+	}
 }
 
 
@@ -726,6 +781,14 @@ void HAL_ADC_ConvCpltCallback(ADC_HandleTypeDef* hadc)
     	HAL_GPIO_TogglePin(led_pb12_GPIO_Port,  led_pb12_Pin);
     	averaging_adc_values(&adc_buffer[ADC_SAMPLES * CHANNELS_CNT]);	// Усреднеине значений из второй половины буфера
     }
+}
+
+
+// завершена передача всех данных по UART_DMA
+void HAL_UART_TxCpltCallback(UART_HandleTypeDef *huart)
+{
+	uart_mutex = 1;	// Отпускаем мьютекс
+	HAL_TIM_Base_Start_IT(&htim4);	// Снова разрешаем работу прерываний Таймера4
 }
 
 
