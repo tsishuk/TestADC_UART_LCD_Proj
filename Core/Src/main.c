@@ -35,6 +35,9 @@
 
 /* Private define ------------------------------------------------------------*/
 /* USER CODE BEGIN PD */
+
+#define UART_MS_TIMEOUT 1000	// Период в мс выдачи информации по UART1
+
 /* USER CODE END PD */
 
 /* Private macro -------------------------------------------------------------*/
@@ -43,10 +46,10 @@
 /* USER CODE END PM */
 
 /* Private variables ---------------------------------------------------------*/
+UART_HandleTypeDef huart1;
 
 /* USER CODE BEGIN PV */
 
-char lcd_str[16];	// строка для отображения на LCD1602
 int temperature;
 float adc_value;
 
@@ -55,6 +58,7 @@ float adc_value;
 /* Private function prototypes -----------------------------------------------*/
 void SystemClock_Config(void);
 static void MX_GPIO_Init(void);
+static void MX_USART1_UART_Init(void);
 /* USER CODE BEGIN PFP */
 
 /* USER CODE END PFP */
@@ -72,7 +76,11 @@ int main(void)
 {
   /* USER CODE BEGIN 1 */
 
-	uint8_t str_size;
+	uint8_t str_size;	// Для подсчёта текущей	 длины строки для вывода на LCD1602
+	int size;	// Для подсчёта текущей	 длины строки UART
+	uint32_t now = 0, then = 0;	// Для отсчёта интервалов времени
+	char buf[100];	// буфер для UART-строки с запасом по кол-ву символов
+	char lcd_str[16];	// строка для отображения на LCD1602
 
   /* USER CODE END 1 */
 
@@ -94,6 +102,7 @@ int main(void)
 
   /* Initialize all configured peripherals */
   MX_GPIO_Init();
+  MX_USART1_UART_Init();
   /* USER CODE BEGIN 2 */
 
 	LCD_init();
@@ -126,9 +135,23 @@ int main(void)
 
     /* USER CODE BEGIN 3 */
 
-	  // Отладочная мигалка
-	HAL_GPIO_TogglePin(led_pc13_GPIO_Port, led_pc13_Pin);
-	HAL_Delay(500);
+	// Получаем кол-во прошедших со старта мс
+	now = HAL_GetTick();
+
+	// Вывод усреднённых значений по UART каждую секунду
+	// >= используется на случай если вывод по UART состояния кнопок займёт лишние мс
+	if ((now - then) >= UART_MS_TIMEOUT)
+	{
+		then = now;
+
+		sprintf(buf, "Hello uart\n");
+		size = strlen(buf);
+		HAL_UART_Transmit(&huart1, (uint8_t*)buf, size, 50);
+
+		// Отладочная мигалка
+		HAL_GPIO_TogglePin(led_pc13_GPIO_Port, led_pc13_Pin);
+		HAL_Delay(500);
+	}
 
   }
   /* USER CODE END 3 */
@@ -171,6 +194,39 @@ void SystemClock_Config(void)
   {
     Error_Handler();
   }
+}
+
+/**
+  * @brief USART1 Initialization Function
+  * @param None
+  * @retval None
+  */
+static void MX_USART1_UART_Init(void)
+{
+
+  /* USER CODE BEGIN USART1_Init 0 */
+
+  /* USER CODE END USART1_Init 0 */
+
+  /* USER CODE BEGIN USART1_Init 1 */
+
+  /* USER CODE END USART1_Init 1 */
+  huart1.Instance = USART1;
+  huart1.Init.BaudRate = 115200;
+  huart1.Init.WordLength = UART_WORDLENGTH_8B;
+  huart1.Init.StopBits = UART_STOPBITS_1;
+  huart1.Init.Parity = UART_PARITY_NONE;
+  huart1.Init.Mode = UART_MODE_TX;
+  huart1.Init.HwFlowCtl = UART_HWCONTROL_NONE;
+  huart1.Init.OverSampling = UART_OVERSAMPLING_16;
+  if (HAL_UART_Init(&huart1) != HAL_OK)
+  {
+    Error_Handler();
+  }
+  /* USER CODE BEGIN USART1_Init 2 */
+
+  /* USER CODE END USART1_Init 2 */
+
 }
 
 /**
