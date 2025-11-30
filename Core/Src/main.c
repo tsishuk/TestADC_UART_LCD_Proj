@@ -63,6 +63,7 @@ ADC_HandleTypeDef hadc1;
 DMA_HandleTypeDef hdma_adc1;
 
 TIM_HandleTypeDef htim1;
+TIM_HandleTypeDef htim2;
 TIM_HandleTypeDef htim3;
 
 UART_HandleTypeDef huart1;
@@ -91,6 +92,7 @@ static void MX_USART1_UART_Init(void);
 static void MX_TIM1_Init(void);
 static void MX_TIM3_Init(void);
 static void MX_ADC1_Init(void);
+static void MX_TIM2_Init(void);
 /* USER CODE BEGIN PFP */
 
 /* USER CODE END PFP */
@@ -102,6 +104,7 @@ static void MX_ADC1_Init(void);
 void averaging_adc_values(uint16_t *buffer) {
 
     uint32_t sum[6] = {0,0,0,0,0,0};	// Для целочисленных сумм значений соответствующих каналов
+    uint16_t pwm_value;
 
     for (int i = 0; i < ADC_SAMPLES; i++) {
     	sum[0] += buffer[i * CHANNELS_CNT];	// Суммируем значения полученные от канала за все отсчёты
@@ -111,6 +114,12 @@ void averaging_adc_values(uint16_t *buffer) {
     	sum[4] += buffer[4 + i * CHANNELS_CNT];
     	sum[5] += buffer[5 + i * CHANNELS_CNT];
     }
+
+    // Значение CounterAutoReload специально задано 4096, чтобы без преобразований переписывать значение АЦП1
+    pwm_value = (sum[0] / ADC_SAMPLES);	// Новое значение для скважности ШиМа
+    if (pwm_value < 2)
+    	pwm_value = 2;	// Ограничиваем минимально возможную скважность (1мкс плохо видит шинный анализатор)
+    TIM2->CCR3 = pwm_value;
 
     adc1_v = (float)((sum[0] / ADC_SAMPLES)*(Vref / 0xFFF));	// Для получения значений в диапазоне 0В - 3.3В
     adc2_v = (float)((sum[1] / ADC_SAMPLES)*(Vref / 0xFFF));
@@ -163,6 +172,7 @@ int main(void)
   MX_TIM1_Init();
   MX_TIM3_Init();
   MX_ADC1_Init();
+  MX_TIM2_Init();
   /* USER CODE BEGIN 2 */
 
 	LCD_init();
@@ -189,6 +199,9 @@ int main(void)
 	HAL_ADC_Start_DMA(&hadc1, (uint32_t *)adc_buffer, ADC_SAMPLES * CHANNELS_CNT * 2);	// Запуск АЦП с сохранением отсчётов через DMA в кольцевой буфер
 	HAL_TIM_Base_Start_IT(&htim1);	// Таймер для отсчёта 5мс (опрос кнопок BUT1, BUT2 в прерывании)
 	HAL_TIM_Base_Start_IT(&htim3);	// Таймер для отсчёта 100мкс(10КГц) для запуска АЦП
+
+	HAL_TIM_PWM_Start(&htim2, TIM_CHANNEL_3);	// Запуск генерации ШИМ (TIM2->CH3)
+	TIM2->CCR3 = 1;	// Установка начального значения скважности ШИМ
 
   /* USER CODE END 2 */
 
@@ -427,6 +440,55 @@ static void MX_TIM1_Init(void)
   /* USER CODE BEGIN TIM1_Init 2 */
 
   /* USER CODE END TIM1_Init 2 */
+
+}
+
+/**
+  * @brief TIM2 Initialization Function
+  * @param None
+  * @retval None
+  */
+static void MX_TIM2_Init(void)
+{
+
+  /* USER CODE BEGIN TIM2_Init 0 */
+
+  /* USER CODE END TIM2_Init 0 */
+
+  TIM_MasterConfigTypeDef sMasterConfig = {0};
+  TIM_OC_InitTypeDef sConfigOC = {0};
+
+  /* USER CODE BEGIN TIM2_Init 1 */
+
+  /* USER CODE END TIM2_Init 1 */
+  htim2.Instance = TIM2;
+  htim2.Init.Prescaler = 72;
+  htim2.Init.CounterMode = TIM_COUNTERMODE_UP;
+  htim2.Init.Period = 4096;
+  htim2.Init.ClockDivision = TIM_CLOCKDIVISION_DIV1;
+  htim2.Init.AutoReloadPreload = TIM_AUTORELOAD_PRELOAD_DISABLE;
+  if (HAL_TIM_PWM_Init(&htim2) != HAL_OK)
+  {
+    Error_Handler();
+  }
+  sMasterConfig.MasterOutputTrigger = TIM_TRGO_RESET;
+  sMasterConfig.MasterSlaveMode = TIM_MASTERSLAVEMODE_DISABLE;
+  if (HAL_TIMEx_MasterConfigSynchronization(&htim2, &sMasterConfig) != HAL_OK)
+  {
+    Error_Handler();
+  }
+  sConfigOC.OCMode = TIM_OCMODE_PWM1;
+  sConfigOC.Pulse = 0;
+  sConfigOC.OCPolarity = TIM_OCPOLARITY_HIGH;
+  sConfigOC.OCFastMode = TIM_OCFAST_DISABLE;
+  if (HAL_TIM_PWM_ConfigChannel(&htim2, &sConfigOC, TIM_CHANNEL_3) != HAL_OK)
+  {
+    Error_Handler();
+  }
+  /* USER CODE BEGIN TIM2_Init 2 */
+
+  /* USER CODE END TIM2_Init 2 */
+  HAL_TIM_MspPostInit(&htim2);
 
 }
 
