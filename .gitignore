@@ -15,7 +15,6 @@ MDK-ARM/Debug*
 *.d
 *.crf
 
-Drivers/
 *.uv*
 *.htm
 *.lnp
