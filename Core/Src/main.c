@@ -44,6 +44,7 @@
 #define CHANNELS_CNT 6	// Кол-во кактивных аналов АЦП участвующих в получении значений
 
 #define UART_MS_TIMEOUT 1000	// Период в мс выдачи информации по UART1
+#define LCD_MS_TIMEOUT 500	// Период в мс выдачи информации по LCD1602
 
 typedef enum {	// Для хранения состояния кнопок BTN1, BTN2
 	NO_PRESS,
@@ -141,11 +142,12 @@ int main(void)
 {
   /* USER CODE BEGIN 1 */
 
-	uint8_t str_size;	// Для подсчёта текущей	 длины строки для вывода на LCD1602
-	int size;	// Для подсчёта текущей	 длины строки UART
-	uint32_t now = 0, then = 0;	// Для отсчёта интервалов времени
+	uint32_t now_lcd = 0, then_lcd = 250;	// Для отсчёта интервалов времени между выдачами по LCD1602
+	uint32_t now_uart = 0, then_uart = 0;	// Для отсчёта интервалов времени между выдачами по UART
 	char buf[100];	// буфер для UART-строки с запасом по кол-ву символов
 	char lcd_str[16];	// строка для отображения на LCD1602
+	uint8_t str_size;	// Для подсчёта текущей	 длины строки для вывода на LCD1602
+	uint8_t size;	// Для подсчёта текущей	 длины строки UART
 
   /* USER CODE END 1 */
 
@@ -177,7 +179,7 @@ int main(void)
 
 	LCD_init();
 
-
+	/*
 	LCD_SetPos(0, 0);	// Перевод курсора на 0 символ 0 строки (отсчёт с нуля)
 	sprintf(lcd_str, "%3ddg %2.1fv", 23, 1.2);
 	str_size = strlen(lcd_str);
@@ -191,6 +193,7 @@ int main(void)
 	if (str_size < 16)
 		lcd_str[str_size] = 0;
 	LCD_String(lcd_str);
+	*/
 
 
 	// Разрешён ScanConversionMode для того чтобы можно было опрашивать несколько каналов АЦП подряд
@@ -200,8 +203,8 @@ int main(void)
 	HAL_TIM_Base_Start_IT(&htim1);	// Таймер для отсчёта 5мс (опрос кнопок BUT1, BUT2 в прерывании)
 	HAL_TIM_Base_Start_IT(&htim3);	// Таймер для отсчёта 100мкс(10КГц) для запуска АЦП
 
-	HAL_TIM_PWM_Start(&htim2, TIM_CHANNEL_3);	// Запуск генерации ШИМ (TIM2->CH3)
-	TIM2->CCR3 = 1;	// Установка начального значения скважности ШИМ
+	HAL_TIM_PWM_Start(&htim2, TIM_CHANNEL_3);	// Запуск генерации Ш�?М (TIM2->CH3)
+	TIM2->CCR3 = 1;	// Установка начального значения скважности Ш�?М
 
   /* USER CODE END 2 */
 
@@ -237,13 +240,13 @@ int main(void)
 	}
 
 	// Получаем кол-во прошедших со старта мс
-	now = HAL_GetTick();
+	now_uart = HAL_GetTick();
 
 	// Вывод усреднённых значений по UART каждую секунду
 	// >= используется на случай если вывод по UART состояния кнопок займёт лишние мс
-	if ((now - then) >= UART_MS_TIMEOUT)
+	if ((now_uart - then_uart) >= UART_MS_TIMEOUT)
 	{
-		then = now;
+		then_uart = now_uart;
 
 		sprintf(buf, "ts = %2ddg, tt = %1ddg, u1 = %2.1fV, u2 = %2.1fV, u3 = %2.1fV, u4 = %2.1fV, u5 = %2.1fV\n",
 						(int)adc_temperature, ten_temperature, adc1_v, adc2_v, adc3_v, adc4_v, adc5_v);
@@ -252,6 +255,27 @@ int main(void)
 
 		// Отладочная мигалка
 		HAL_GPIO_TogglePin(led_pc13_GPIO_Port, led_pc13_Pin);
+	}
+
+	// Вывод усреднённых значений на LCD1602 каждые 500мс
+	now_lcd = HAL_GetTick();
+	if ((now_lcd - then_lcd) >= LCD_MS_TIMEOUT)
+	{
+		then_lcd = now_lcd;
+
+		LCD_SetPos(0, 0);	// Перевод курсора на 0 символ 0 строки (отсчёт с нуля)
+		sprintf(lcd_str, "%3ddg %2.1fv %2.1fv", (int)adc_temperature, adc1_v, adc2_v);
+		str_size = strlen(lcd_str);
+		if (str_size < 16)
+			lcd_str[str_size] = 0;
+		LCD_String(lcd_str);
+
+		LCD_SetPos(1, 1);	// Перевод курсора на 1 символ 1 строки (для выравнивания строк)
+		sprintf(lcd_str, "%2.1fv %2.1fv %2.1fv", adc3_v, adc4_v, adc5_v);
+		str_size = strlen(lcd_str);
+		if (str_size < 16)
+			lcd_str[str_size] = 0;
+		LCD_String(lcd_str);
 	}
 
   }
@@ -418,7 +442,7 @@ static void MX_TIM1_Init(void)
   htim1.Instance = TIM1;
   htim1.Init.Prescaler = 720;
   htim1.Init.CounterMode = TIM_COUNTERMODE_UP;
-  htim1.Init.Period = 499;
+  htim1.Init.Period = 999;
   htim1.Init.ClockDivision = TIM_CLOCKDIVISION_DIV1;
   htim1.Init.RepetitionCounter = 0;
   htim1.Init.AutoReloadPreload = TIM_AUTORELOAD_PRELOAD_DISABLE;
