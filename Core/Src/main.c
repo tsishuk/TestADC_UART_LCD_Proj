@@ -38,6 +38,12 @@
 
 #define UART_MS_TIMEOUT 1000	// Период в мс выдачи информации по UART1
 
+typedef enum {	// Для хранения состояния кнопок BTN1, BTN2
+	NO_PRESS,
+	PRESS,
+	RELEASE
+} BTN_STATE;
+
 /* USER CODE END PD */
 
 /* Private macro -------------------------------------------------------------*/
@@ -46,6 +52,8 @@
 /* USER CODE END PM */
 
 /* Private variables ---------------------------------------------------------*/
+TIM_HandleTypeDef htim1;
+
 UART_HandleTypeDef huart1;
 
 /* USER CODE BEGIN PV */
@@ -53,12 +61,16 @@ UART_HandleTypeDef huart1;
 int temperature;
 float adc_value;
 
+uint8_t but1_shift_reg = 0, but2_shift_reg = 0;	// Сдвиговые регистры для отслеживания нажатий\отпусканий кнопок
+BTN_STATE btn1_state = NO_PRESS, btn2_state = NO_PRESS;	// Текущее состояние кнопок
+
 /* USER CODE END PV */
 
 /* Private function prototypes -----------------------------------------------*/
 void SystemClock_Config(void);
 static void MX_GPIO_Init(void);
 static void MX_USART1_UART_Init(void);
+static void MX_TIM1_Init(void);
 /* USER CODE BEGIN PFP */
 
 /* USER CODE END PFP */
@@ -103,6 +115,7 @@ int main(void)
   /* Initialize all configured peripherals */
   MX_GPIO_Init();
   MX_USART1_UART_Init();
+  MX_TIM1_Init();
   /* USER CODE BEGIN 2 */
 
 	LCD_init();
@@ -125,6 +138,8 @@ int main(void)
 		lcd_str[str_size] = 0;
 	LCD_String(lcd_str);
 
+	HAL_TIM_Base_Start_IT(&htim1);		// Таймер для отсчёта 10мс (опрос кнопок BUT1, BUT2 в прерывании)
+
   /* USER CODE END 2 */
 
   /* Infinite loop */
@@ -134,6 +149,29 @@ int main(void)
     /* USER CODE END WHILE */
 
     /* USER CODE BEGIN 3 */
+
+	// Асинхронный вывод нажатий\отпусканий кнопок
+	if (btn1_state != NO_PRESS)
+	{
+		if (btn1_state == PRESS)
+			sprintf(buf, "BUT1 pressed\n");
+		else
+			sprintf(buf, "BUT1 released\n");
+		size = strlen(buf);
+		btn1_state = NO_PRESS;
+		HAL_UART_Transmit(&huart1, (uint8_t*)buf, size, 100);
+	}
+
+	if (btn2_state != NO_PRESS)
+	{
+		if (btn2_state == PRESS)
+			sprintf(buf, "BUT2 pressed\n");
+		else
+			sprintf(buf, "BUT2 released\n");
+		size = strlen(buf);
+		btn2_state = NO_PRESS;
+		HAL_UART_Transmit(&huart1, (uint8_t*)buf, size, 100);
+	}
 
 	// Получаем кол-во прошедших со старта мс
 	now = HAL_GetTick();
@@ -197,6 +235,52 @@ void SystemClock_Config(void)
 }
 
 /**
+  * @brief TIM1 Initialization Function
+  * @param None
+  * @retval None
+  */
+static void MX_TIM1_Init(void)
+{
+
+  /* USER CODE BEGIN TIM1_Init 0 */
+
+  /* USER CODE END TIM1_Init 0 */
+
+  TIM_ClockConfigTypeDef sClockSourceConfig = {0};
+  TIM_MasterConfigTypeDef sMasterConfig = {0};
+
+  /* USER CODE BEGIN TIM1_Init 1 */
+
+  /* USER CODE END TIM1_Init 1 */
+  htim1.Instance = TIM1;
+  htim1.Init.Prescaler = 720;
+  htim1.Init.CounterMode = TIM_COUNTERMODE_UP;
+  htim1.Init.Period = 499;
+  htim1.Init.ClockDivision = TIM_CLOCKDIVISION_DIV1;
+  htim1.Init.RepetitionCounter = 0;
+  htim1.Init.AutoReloadPreload = TIM_AUTORELOAD_PRELOAD_DISABLE;
+  if (HAL_TIM_Base_Init(&htim1) != HAL_OK)
+  {
+    Error_Handler();
+  }
+  sClockSourceConfig.ClockSource = TIM_CLOCKSOURCE_INTERNAL;
+  if (HAL_TIM_ConfigClockSource(&htim1, &sClockSourceConfig) != HAL_OK)
+  {
+    Error_Handler();
+  }
+  sMasterConfig.MasterOutputTrigger = TIM_TRGO_UPDATE;
+  sMasterConfig.MasterSlaveMode = TIM_MASTERSLAVEMODE_DISABLE;
+  if (HAL_TIMEx_MasterConfigSynchronization(&htim1, &sMasterConfig) != HAL_OK)
+  {
+    Error_Handler();
+  }
+  /* USER CODE BEGIN TIM1_Init 2 */
+
+  /* USER CODE END TIM1_Init 2 */
+
+}
+
+/**
   * @brief USART1 Initialization Function
   * @param None
   * @retval None
@@ -241,17 +325,18 @@ static void MX_GPIO_Init(void)
   /* GPIO Ports Clock Enable */
   __HAL_RCC_GPIOC_CLK_ENABLE();
   __HAL_RCC_GPIOD_CLK_ENABLE();
-  __HAL_RCC_GPIOA_CLK_ENABLE();
   __HAL_RCC_GPIOB_CLK_ENABLE();
+  __HAL_RCC_GPIOA_CLK_ENABLE();
 
   /*Configure GPIO pin Output Level */
   HAL_GPIO_WritePin(led_pc13_GPIO_Port, led_pc13_Pin, GPIO_PIN_RESET);
 
   /*Configure GPIO pin Output Level */
-  HAL_GPIO_WritePin(GPIOA, EN_Pin|RS_Pin, GPIO_PIN_RESET);
+  HAL_GPIO_WritePin(GPIOB, led_pb10_Pin|D4_Pin|D5_Pin|D6_Pin
+                          |D7_Pin, GPIO_PIN_RESET);
 
   /*Configure GPIO pin Output Level */
-  HAL_GPIO_WritePin(GPIOB, D4_Pin|D5_Pin|D6_Pin|D7_Pin, GPIO_PIN_RESET);
+  HAL_GPIO_WritePin(GPIOA, EN_Pin|RS_Pin, GPIO_PIN_RESET);
 
   /*Configure GPIO pin : led_pc13_Pin */
   GPIO_InitStruct.Pin = led_pc13_Pin;
@@ -259,6 +344,19 @@ static void MX_GPIO_Init(void)
   GPIO_InitStruct.Pull = GPIO_NOPULL;
   GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;
   HAL_GPIO_Init(led_pc13_GPIO_Port, &GPIO_InitStruct);
+
+  /*Configure GPIO pins : led_pb10_Pin D7_Pin */
+  GPIO_InitStruct.Pin = led_pb10_Pin|D7_Pin;
+  GPIO_InitStruct.Mode = GPIO_MODE_OUTPUT_PP;
+  GPIO_InitStruct.Pull = GPIO_NOPULL;
+  GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;
+  HAL_GPIO_Init(GPIOB, &GPIO_InitStruct);
+
+  /*Configure GPIO pins : BUT1_Pin BUT2_Pin */
+  GPIO_InitStruct.Pin = BUT1_Pin|BUT2_Pin;
+  GPIO_InitStruct.Mode = GPIO_MODE_INPUT;
+  GPIO_InitStruct.Pull = GPIO_PULLUP;
+  HAL_GPIO_Init(GPIOB, &GPIO_InitStruct);
 
   /*Configure GPIO pins : EN_Pin RS_Pin */
   GPIO_InitStruct.Pin = EN_Pin|RS_Pin;
@@ -274,16 +372,39 @@ static void MX_GPIO_Init(void)
   GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_HIGH;
   HAL_GPIO_Init(GPIOB, &GPIO_InitStruct);
 
-  /*Configure GPIO pin : D7_Pin */
-  GPIO_InitStruct.Pin = D7_Pin;
-  GPIO_InitStruct.Mode = GPIO_MODE_OUTPUT_PP;
-  GPIO_InitStruct.Pull = GPIO_NOPULL;
-  GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;
-  HAL_GPIO_Init(D7_GPIO_Port, &GPIO_InitStruct);
-
 }
 
 /* USER CODE BEGIN 4 */
+
+// Колбэк прерываний от Таймеров
+void HAL_TIM_PeriodElapsedCallback(TIM_HandleTypeDef *htim)
+{
+	// Предназначен для обработки кнопок PB14(BUT1), PB15(BUT2)
+	if (htim->Instance == TIM1)
+	{
+		HAL_GPIO_TogglePin(led_pb10_GPIO_Port, led_pb10_Pin);	// Отладочная мигалка
+
+		// Для BUT1
+		but1_shift_reg <<= 1;	// Сдвигаем регистр на 1 разряд влево
+		if (HAL_GPIO_ReadPin(BUT1_GPIO_Port, BUT1_Pin) == GPIO_PIN_RESET)	// Опрашиваем пин к которому подключена кнопка1
+			but1_shift_reg |= 1;	// Если в этот момент кнопка нажата - задвигаем в младший разряд единичку
+
+		if (but1_shift_reg == 0x0F)
+			btn1_state = PRESS;	// При такой комбинации в сдвиговом регистре фиксируется нажатие на кнопку
+		else if (but1_shift_reg == 0xF0)
+			btn1_state = RELEASE;	// При такой комбинации в сдвиговом регистре фиксируется отпускание кнопки
+
+		// Для BUT2
+		but2_shift_reg <<= 1;
+		if (HAL_GPIO_ReadPin(BUT2_GPIO_Port, BUT2_Pin) == GPIO_PIN_RESET)	// Опрашиваем пин к которому подключена кнопка2
+			but2_shift_reg |= 1;
+
+		if (but2_shift_reg == 0x0F)
+			btn2_state = PRESS;
+		else if (but2_shift_reg == 0xF0)
+			btn2_state = RELEASE;
+	}
+}
 
 /* USER CODE END 4 */
 
